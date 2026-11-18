@@ -1,6 +1,6 @@
 # Überschreibbar per Env, z. B. ENCOUNTER_CLOSER__BATCH_SIZE=500
 interval = "2m"            # Pause zwischen Läufen (Ende -> Start), z. B. "1h", "30m"
-initial_delay = "1m"
+initial_delay = "10s"
 batch_size = 200
 levels = 2                  # Einrichtung -> Abteilung -> Versorgungsstelle
 collection = "Encounter"

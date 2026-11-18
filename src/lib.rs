@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    time::Duration,
-};
+use std::{collections::HashSet, future::Future, time::Duration};
 
 use anyhow::{Context, Result};
 use futures::{TryStreamExt, future::join_all};
@@ -15,7 +11,7 @@ use rdkafka::{
     util::Timeout,
 };
 use serde::Deserialize;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // ---- Feldnamen (an einer Stelle änderbar) ----
 pub const F_ID: &str = "_id";
@@ -69,7 +65,11 @@ fn default_send_timeout() -> Duration {
 pub fn load_settings() -> Result<Settings> {
     config::Config::builder()
         .add_source(config::File::with_name("config").required(false))
-        .add_source(config::Environment::with_prefix("ENCOUNTER_CLOSER").separator("__"))
+        .add_source(
+            config::Environment::with_prefix("ENCOUNTER_CLOSER")
+                .separator("__")
+                .try_parsing(true),
+        )
         .build()?
         .try_deserialize::<Settings>()
         .context("Konfiguration ungültig")
@@ -158,10 +158,10 @@ impl<S: EventSink> Closer<S> {
             }
             last_id = children.last().and_then(|d| d.get(F_ID).cloned());
 
-            // 2) Eltern in einer Abfrage laden, nur abgeschlossene
+            // 2) Beendete Eltern in einer Abfrage ermitteln
             let parent_ids: HashSet<String> = children.iter().filter_map(parent_fhir_id).collect();
 
-            let mut parent_end: HashMap<String, Bson> = HashMap::new();
+            let mut ended_parents: HashSet<String> = HashSet::new();
             if !parent_ids.is_empty() {
                 let ids: Vec<String> = parent_ids.into_iter().collect();
                 let parents: Vec<Document> = self
@@ -176,18 +176,28 @@ impl<S: EventSink> Closer<S> {
                     .try_collect()
                     .await?;
                 for p in parents {
-                    if let (Ok(fid), Some(end)) = (p.get_str(F_FHIR_ID), get_end(&p)) {
-                        parent_end.insert(fid.to_string(), end);
+                    if let (Ok(fid), Some(_)) = (p.get_str(F_FHIR_ID), get_end(&p)) {
+                        ended_parents.insert(fid.to_string());
                     }
                 }
             }
 
-            // 3) Kinder abschließen (optimistisch: nur wenn noch offen)
+            // 3) Kinder abschließen: period.end := period.start des Kindes
+            //    (optimistisch: nur wenn das Kind noch offen ist)
             let mut updated: Vec<Document> = Vec::new();
             for mut child in children {
-                let Some(end) = parent_fhir_id(&child).and_then(|p| parent_end.get(&p).cloned())
-                else {
+                let Some(parent) = parent_fhir_id(&child) else {
+                    continue;
+                };
+                if !ended_parents.contains(&parent) {
                     continue; // Elternteil offen oder nicht gefunden
+                }
+                let Some(end) = get_start(&child) else {
+                    warn!(
+                        "Kind {:?} hat kein period.start, wird nicht abgeschlossen",
+                        child.get(F_FHIR_ID)
+                    );
+                    continue;
                 };
 
                 let res = self
@@ -288,25 +298,33 @@ impl<S: EventSink> Closer<S> {
 
 /// `Encounter/abc` -> `abc`, reine ID bleibt unverändert.
 pub fn parent_fhir_id(d: &Document) -> Option<String> {
-    let reference = d.get_document("partOf").ok()?.get_str("reference").ok()?;
+    let reference = d.get_document("resource").ok()?.get_document("partOf").ok()?.get_str("reference").ok()?;
     reference.rsplit('/').next().map(str::to_string)
 }
 
 pub fn get_end(d: &Document) -> Option<Bson> {
-    d.get_document("period")
+    d.get_document("resource").ok()?.get_document("period")
         .ok()?
         .get("end")
         .filter(|b| !matches!(b, Bson::Null))
         .cloned()
 }
 
+pub fn get_start(d: &Document) -> Option<Bson> {
+    d.get_document("resource").ok()?.get_document("period")
+        .ok()?
+        .get("start")
+        .filter(|b| !matches!(b, Bson::Null))
+        .cloned()
+}
+
 pub fn set_end(d: &mut Document, end: Bson) {
-    match d.get_document_mut("period") {
+    match d.get_document_mut("resource").expect("expect resource property").get_document_mut("period") {
         Ok(p) => {
             p.insert("end", end);
         }
         Err(_) => {
-            d.insert("period", doc! { "end": end });
+            d.insert("resource.period", doc! { "end": end });
         }
     }
 }
@@ -354,6 +372,18 @@ mod tests {
         assert_eq!(get_end(&doc! { "period": { "end": Bson::Null } }), None);
         assert_eq!(get_end(&doc! { "period": { "start": dt } }), None);
         assert_eq!(get_end(&doc! {}), None);
+    }
+
+    #[test]
+    fn get_start_liefert_wert_oder_none() {
+        let dt = DateTime::from_millis(1_700_000_000_000);
+        assert_eq!(
+            get_start(&doc! { "period": { "start": dt } }),
+            Some(Bson::DateTime(dt))
+        );
+        assert_eq!(get_start(&doc! { "period": { "start": Bson::Null } }), None);
+        assert_eq!(get_start(&doc! { "period": { "end": dt } }), None);
+        assert_eq!(get_start(&doc! {}), None);
     }
 
     #[test]
