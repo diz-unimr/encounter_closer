@@ -1,0 +1,11 @@
+# Überschreibbar per Env, z. B. ENCOUNTER_CLOSER__BATCH_SIZE=500
+interval = "2m"            # Pause zwischen Läufen (Ende -> Start), z. B. "1h", "30m"
+initial_delay = "1m"
+batch_size = 200
+levels = 2                  # Einrichtung -> Abteilung -> Versorgungsstelle
+collection = "Encounter"
+target_topic = "encounter.closed"
+kafka_send_timeout = "30s"
+mongo_uri = "mongodb://localhost:27017"
+mongo_db = "fhir"
+kafka_bootstrap_servers = "localhost:29092"

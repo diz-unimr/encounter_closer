@@ -1,0 +1,115 @@
+name: encounter-closer
+
+# Profile:
+#   (keins)  -> nur Infrastruktur: mongo, kafka, kafka-init
+#   app      -> + Seed-Daten, Anwendung und Konsument, der das Ziel-Topic ausgibt
+#   test     -> + Test-Runner (Unit- und Integrationstests im Container)
+
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.8.0
+    hostname: kafka
+    ports:
+      - "29092:29092" # vom Host erreichbar unter localhost:29092
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --topic encounter.closed
+        --partitions 3 --replication-factor 1
+
+  # ---------- Profil "app" ----------
+  mongo-seed:
+    profiles: ["app"]
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./docker/seed.js:/seed/seed.js:ro
+    command: ["mongosh", "--quiet", "mongodb://mongo:27017/fhir", "/seed/seed.js"]
+
+  app:
+    profiles: ["app"]
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      mongo-seed:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      ENCOUNTER_CLOSER__MONGO_URI: mongodb://mongo:27017
+      ENCOUNTER_CLOSER__MONGO_DB: fhir
+      ENCOUNTER_CLOSER__KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ENCOUNTER_CLOSER__TARGET_TOPIC: encounter.closed
+      ENCOUNTER_CLOSER__INTERVAL: 1m # im Demo kurz; Produktiv-Default ist 24h
+      ENCOUNTER_CLOSER__INITIAL_DELAY: 5s
+      ENCOUNTER_CLOSER__BATCH_SIZE: "200"
+      RUST_LOG: info
+
+  consumer:
+    profiles: ["app"]
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    entrypoint: ["/opt/kafka/bin/kafka-console-consumer.sh"]
+    command:
+      - --bootstrap-server
+      - kafka:9092
+      - --topic
+      - encounter.closed
+      - --from-beginning
+      - --property
+      - print.key=true
+
+  # ---------- Profil "test" ----------
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      # Integrationstests nutzen dieses MongoDB statt Testcontainers (kein Docker-Socket nötig)
+      TEST_MONGO_URI: mongodb://mongo:27017
