@@ -21,7 +21,7 @@ FROM base AS builder
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build --release \
- && cp target/release/encounter-closer /usr/local/bin/encounter-closer
+ && cp target/release/encounter_closer /usr/local/bin/encounter-closer
 
 # ---- schlankes Laufzeit-Image ----
 FROM debian:bookworm-slim AS runtime
