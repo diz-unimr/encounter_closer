@@ -319,12 +319,12 @@ pub fn get_start(d: &Document) -> Option<Bson> {
 }
 
 pub fn set_end(d: &mut Document, end: Bson) {
-    match d.get_document_mut("resource").expect("expect resource property").get_document_mut("period") {
+    match d.get_document_mut("resource").expect("expect 'resource' property").get_document_mut("period") {
         Ok(p) => {
             p.insert("end", end);
         }
         Err(_) => {
-            d.insert("resource.period", doc! { "end": end });
+            d.get_document_mut("resource").expect("expect 'resource' property").insert("period", doc! { "end": end });
         }
     }
 }
@@ -345,13 +345,13 @@ mod tests {
 
     #[test]
     fn parent_id_aus_referenz_mit_praefix() {
-        let d = doc! { "partOf": { "reference": "Encounter/abc-123" } };
+        let d = doc! { "resource": {"partOf": { "reference": "Encounter/abc-123" } } };
         assert_eq!(parent_fhir_id(&d).as_deref(), Some("abc-123"));
     }
 
     #[test]
     fn parent_id_aus_reiner_id() {
-        let d = doc! { "partOf": { "reference": "abc-123" } };
+        let d = doc! { "resource": {"partOf": { "reference": "abc-123" } }};
         assert_eq!(parent_fhir_id(&d).as_deref(), Some("abc-123"));
     }
 
@@ -366,7 +366,7 @@ mod tests {
     fn get_end_liefert_wert_oder_none() {
         let dt = DateTime::from_millis(1_700_000_000_000);
         assert_eq!(
-            get_end(&doc! { "period": { "end": dt } }),
+            get_end(&doc! { "resource": {"period": { "end": dt } }}),
             Some(Bson::DateTime(dt))
         );
         assert_eq!(get_end(&doc! { "period": { "end": Bson::Null } }), None);
@@ -378,7 +378,7 @@ mod tests {
     fn get_start_liefert_wert_oder_none() {
         let dt = DateTime::from_millis(1_700_000_000_000);
         assert_eq!(
-            get_start(&doc! { "period": { "start": dt } }),
+            get_start(&doc! { "resource": {"period": { "start": dt } }}),
             Some(Bson::DateTime(dt))
         );
         assert_eq!(get_start(&doc! { "period": { "start": Bson::Null } }), None);
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn get_end_unterstuetzt_strings() {
-        let d = doc! { "period": { "end": "2025-01-31T10:00:00Z" } };
+        let d = doc! { "resource": {"period": { "end": "2025-01-31T10:00:00Z" } }};
         assert_eq!(
             get_end(&d),
             Some(Bson::String("2025-01-31T10:00:00Z".into()))
@@ -397,30 +397,30 @@ mod tests {
 
     #[test]
     fn set_end_ergaenzt_bestehendes_period() {
-        let mut d = doc! { "period": { "start": "2025-01-01" } };
+        let mut d = doc! {"resource": { "period": { "start": "2025-01-01" } } };
         set_end(&mut d, Bson::String("2025-01-31".into()));
-        let p = d.get_document("period").unwrap();
+        let p = d.get_document("resource").unwrap().get_document("period").unwrap();
         assert_eq!(p.get_str("start").unwrap(), "2025-01-01"); // bleibt erhalten
         assert_eq!(p.get_str("end").unwrap(), "2025-01-31");
     }
 
     #[test]
     fn set_end_legt_period_an_wenn_es_fehlt() {
-        let mut d = doc! { "fhirId": "x" };
+        let mut d = doc! { "fhirId": "x", "resource":{}};
         set_end(&mut d, Bson::String("2025-01-31".into()));
         assert_eq!(
-            d.get_document("period").unwrap().get_str("end").unwrap(),
+            d.get_document("resource").unwrap().get_document("period").unwrap().get_str("end").unwrap(),
             "2025-01-31"
         );
     }
 
     #[test]
     fn payload_enthaelt_kein_outbox_flag_und_key_ist_fhir_id() {
-        let d = doc! { "fhirId": "enc-1", "status": "finished", F_KAFKA_PENDING: true };
+        let d = doc! { "fhirId": "enc-1", "resource": {"status": "finished", F_KAFKA_PENDING: true }};
         let (key, json) = build_payload(d).unwrap();
         assert_eq!(key, "enc-1");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["status"], "finished");
+        assert_eq!(v["resource"]["status"], "finished");
         assert!(v.get(F_KAFKA_PENDING).is_none());
     }
 }
